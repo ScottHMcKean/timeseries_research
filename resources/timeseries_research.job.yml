@@ -4,12 +4,6 @@ resources:
     timeseries_research_job:
       name: timeseries_research_job
 
-      trigger:
-        # Run this job every day, exactly one day from the last run; see https://docs.databricks.com/api/workspace/jobs/create#trigger
-        periodic:
-          interval: 1
-          unit: DAYS
-
       email_notifications:
         on_failure:
           - scott.mckean@databricks.com
@@ -18,7 +12,7 @@ resources:
         - task_key: notebook_task
           job_cluster_key: job_cluster
           notebook_task:
-            notebook_path: ../src/notebook.ipynb
+            notebook_path: ../src/run_benchmark.ipynb
         
         - task_key: main_task
           depends_on:
@@ -29,9 +23,6 @@ resources:
             package_name: timeseries_research
             entry_point: main
           libraries:
-            # By default we just include the .whl file generated for the timeseries_research package.
-            # See https://docs.databricks.com/dev-tools/bundles/library-dependencies.html
-            # for more information on how to add other libraries.
             - whl: ../dist/*.whl
 
       job_clusters:

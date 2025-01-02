@@ -1,0 +1,4 @@
+# dependencies for databricks deployments
+pytest
+setuptools
+wheel

@@ -1,6 +1,5 @@
-from timeseries_research.main import get_taxis, get_spark
+from dbtsr.main import create_table, get_spark
 
-
-def test_main():
-    taxis = get_taxis(get_spark())
-    assert taxis.count() > 5
+def test_spark():
+    spark = get_spark()
+    spark.sql("SELECT 1.")
