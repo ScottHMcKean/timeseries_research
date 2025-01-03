@@ -6,3 +6,10 @@ pyspark
 # 16.0 doesn't work with serverless just yet
 databricks-connect==15.4.4
 ipykernel
+nbformat>=4.2.0
+datasetsforecast==1.0.0
+plotly==5.24.1
+statsforecast==2.0.0
+matplotlib==3.10.0
+torch==2.5.1
+optuna==4.1.0
