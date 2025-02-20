@@ -43,12 +43,19 @@ data = sales[sales.unique_id.isin(unique_ids)].merge(heirarchy[['unique_id','cat
 
 # COMMAND ----------
 
+spark.createDataFrame(data).write.format('delta').saveAsTable('shm.timeseries.m5_processed')
+
+# COMMAND ----------
+
+data = spark.table('shm.timeseries.m5_processed').toPandas()
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Featurize
 # MAGIC We use Nixtla to accelerate our feature engineering, but can add the feature engineering client in here later.
 
 # COMMAND ----------
-
 
 from mlforecast import MLForecast
 from mlforecast.lag_transforms import ExpandingMean, RollingMean
@@ -86,9 +93,9 @@ display(features_w_label.head(5))
 
 import mlflow
 import numpy as np
-mlflow.lightgbm.autolog()
 
 with mlflow.start_run():
+    mlflow.lightgbm.autolog()
     train = features_w_label.groupby('unique_id').apply(
         lambda x: x.iloc[:-test_size]
     ).reset_index(drop=True)
@@ -129,10 +136,15 @@ with mlflow.start_run():
 
 # COMMAND ----------
 
+model.predict(X_test[:2])
+
+# COMMAND ----------
+
 from mlflow.models import infer_signature
 
 # Infer the model signature
-signature = infer_signature(X_test, y_pred)
+signature = infer_signature(model_input=X_test, model_output=y_pred)
+input_example = mlflow.models.convert_input_example_to_serving_input(X_test[:2])
 
 # Start an MLflow run
 with mlflow.start_run() as run:
@@ -167,7 +179,22 @@ print(predictions)
 
 # Load the logged model from unity catalog
 mlflow.set_registry_uri("databricks-uc")
-model_uri = f"models:/shm.timeseries.lightgbm_model/1"
+model_uri = f"models:/shm.timeseries.lightgbm_model/9"
+loaded_model = mlflow.lightgbm.load_model(model_uri)
+
+# Use the loaded model for predictions
+predictions = loaded_model.predict(X_test[:5])
+print(predictions)
+
+# COMMAND ----------
+
+[0.2357237  0.39726506 0.35437013 0.31285778 0.26780295]
+
+# COMMAND ----------
+
+# Load the logged model from unity catalog
+mlflow.set_registry_uri("databricks-uc")
+model_uri = f"models:/shm.timeseries.lightgbm_model/7"
 loaded_model = mlflow.lightgbm.load_model(model_uri)
 
 # Use the loaded model for predictions
