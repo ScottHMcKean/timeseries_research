@@ -12,8 +12,8 @@
 
 # COMMAND ----------
 
-!pip install -r ../requirements-db.txt --quiet
-%restart_python
+# MAGIC %pip install -r ../requirements-db.txt --quiet
+# MAGIC %restart_python
 
 # COMMAND ----------
 
@@ -34,6 +34,18 @@ sales, calendar, heirarchy = m5_dataset.load(directory='/Volumes/shm/timeseries/
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC Fix our loggers
+
+# COMMAND ----------
+
+import logging
+logger = spark._jvm.org.apache.log4j
+logging.getLogger("py4j").setLevel(logging.ERROR)
+logging.getLogger().setLevel(logging.ERROR)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC Sample 100 time series and merge with heirarchy data to give some categorical features
 
 # COMMAND ----------
@@ -43,7 +55,7 @@ data = sales[sales.unique_id.isin(unique_ids)].merge(heirarchy[['unique_id','cat
 
 # COMMAND ----------
 
-spark.createDataFrame(data).write.format('delta').saveAsTable('shm.timeseries.m5_processed')
+spark.createDataFrame(data).write.mode('overwrite').format('delta').saveAsTable('shm.timeseries.m5_processed')
 
 # COMMAND ----------
 
@@ -54,6 +66,10 @@ data = spark.table('shm.timeseries.m5_processed').toPandas()
 # MAGIC %md
 # MAGIC ## Featurize
 # MAGIC We use Nixtla to accelerate our feature engineering, but can add the feature engineering client in here later.
+
+# COMMAND ----------
+
+data
 
 # COMMAND ----------
 
@@ -82,7 +98,6 @@ fcst = MLForecast(
 features_w_label = fcst.preprocess(data, static_features=[])
 display(features_w_label.head(5))
 
-
 # COMMAND ----------
 
 # MAGIC %md
@@ -99,7 +114,7 @@ with mlflow.start_run():
     train = features_w_label.groupby('unique_id').apply(
         lambda x: x.iloc[:-test_size]
     ).reset_index(drop=True)
-    X_train = train.drop(['y','ds'], axis=1)
+    X_train = train.drop(['y','ds','unique_id','cat_id','state_id'], axis=1)
     y_train = train['y']
     train_data = lgb.Dataset(X_train, label=y_train)
     mlflow.log_table(train, 'train.parquet')
@@ -107,7 +122,7 @@ with mlflow.start_run():
     test = features_w_label.groupby('unique_id').apply(
         lambda x: x.iloc[-test_size:]
     ).reset_index(drop=True)
-    X_test = train.drop(['y','ds'], axis=1)
+    X_test = train.drop(['y','ds','unique_id','cat_id','state_id'], axis=1)
     y_test = train['y']
     test_data = lgb.Dataset(X_test, label=y_test)
     mlflow.log_table(test, 'test.parquet')
@@ -124,7 +139,7 @@ with mlflow.start_run():
     model = lgb.train(
         params,
         train_data,
-        num_boost_round=100,
+        num_boost_round=1000,
         valid_sets=[test_data]
     )
 
@@ -179,7 +194,7 @@ print(predictions)
 
 # Load the logged model from unity catalog
 mlflow.set_registry_uri("databricks-uc")
-model_uri = f"models:/shm.timeseries.lightgbm_model/9"
+model_uri = f"models:/shm.timeseries.lightgbm_model/10"
 loaded_model = mlflow.lightgbm.load_model(model_uri)
 
 # Use the loaded model for predictions
@@ -188,13 +203,33 @@ print(predictions)
 
 # COMMAND ----------
 
-[0.2357237  0.39726506 0.35437013 0.31285778 0.26780295]
+{"dataframe_split": {"columns": ["lag1",
+   "lag2",
+   "lag3",
+   "lag7",
+   "lag14",
+   "lag30",
+   "lag360",
+   "expanding_mean_lag7",
+   "rolling_mean_lag14_window_size7",
+   "rolling_mean_lag30_window_size14"],
+  "data": [[3.0,
+    11.0,
+    2.0,
+    2.0,
+    3.0,
+    0.0,
+    27.0,
+    10.954802513122559,
+    3.7142856121063232,
+    0.0],
+   [3.0, 3.0, 11.0, 4.0, 5.0, 0.0, 32.0, 10.935211181640625, 4.0, 0.0]]}}
 
 # COMMAND ----------
 
 # Load the logged model from unity catalog
 mlflow.set_registry_uri("databricks-uc")
-model_uri = f"models:/shm.timeseries.lightgbm_model/7"
+model_uri = f"models:/shm.timeseries.lightgbm_model/11"
 loaded_model = mlflow.lightgbm.load_model(model_uri)
 
 # Use the loaded model for predictions
@@ -219,6 +254,11 @@ mlflow.set_registry_uri("databricks-uc")
 # Initialize the deployment client
 client = get_deploy_client("databricks")
 
+try:
+    client.delete_endpoint("lightgbm_ts")
+except:
+    pass
+
 # Create the serving endpoint
 endpoint = client.create_endpoint(
     name="lightgbm_ts",
@@ -227,7 +267,7 @@ endpoint = client.create_endpoint(
             {
                 "name": "lightgbm_ts",
                 "entity_name": "shm.timeseries.lightgbm_model",
-                "entity_version": "1",
+                "entity_version": "10",
                 "workload_size": "Small",
                 "scale_to_zero_enabled": True
             }
@@ -244,3 +284,9 @@ endpoint = client.create_endpoint(
 )
 
 print(f"Endpoint created: {endpoint}")
+
+# COMMAND ----------
+
+import mlflow
+import json
+json.loads(mlflow.models.convert_input_example_to_serving_input(X_test[:2]))
