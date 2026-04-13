@@ -1,0 +1,31 @@
+resources:
+  jobs:
+    chronos_forecast_job:
+      name: chronos_forecast_job
+      email_notifications:
+        on_failure:
+          - scott.mckean@databricks.com
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+      tasks:
+        - task_key: prepare_data
+          notebook_task:
+            notebook_path: ../chronos_uco_forecast/prepare_data.py
+            base_parameters:
+              catalog: "shm"
+              schema: "ts"
+          environment_key: default
+
+        - task_key: chronos_forecast
+          depends_on:
+            - task_key: prepare_data
+          notebook_task:
+            notebook_path: ../chronos_uco_forecast/chronos_forecast.py
+            base_parameters:
+              catalog: "shm"
+              schema: "ts"
+          environment_key: default
+          compute:
+            hardware_accelerator: GPU_1xA10
