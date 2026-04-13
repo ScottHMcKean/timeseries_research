@@ -1,0 +1,15 @@
+resources:
+  jobs:
+    canonical_mlflow_job:
+      name: canonical_mlflow_job
+      email_notifications:
+        on_failure:
+          - scott.mckean@databricks.com
+      tasks:
+        - task_key: canonical_mlflow
+          notebook_task:
+            notebook_path: ../canonical_mlflow/canonical_mlflow.py
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: Standard_D4s_v5
+            num_workers: 1

@@ -1,0 +1,29 @@
+[project]
+name = "timeseries-research"
+version = "0.1.0"
+description = "Time series research, benchmarking, and solution accelerators"
+requires-python = ">=3.11"
+dependencies = [
+    "datasetsforecast>=1.0.0",
+    "statsforecast>=2.0.0",
+    "mlforecast>=1.0.1",
+    "lightgbm",
+    "mlflow",
+    "torch",
+    "optuna",
+    "chronos-forecasting",
+    "kagglehub",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ipykernel",
+    "nbformat>=4.2.0",
+    "plotly",
+    "matplotlib",
+    "databricks-connect",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
