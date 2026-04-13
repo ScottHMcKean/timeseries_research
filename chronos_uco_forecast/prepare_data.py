@@ -2,8 +2,9 @@
 # MAGIC %md
 # MAGIC # Prepare Olist E-Commerce Data
 # MAGIC
-# MAGIC Downloads the Olist dataset, joins orders with payments,
-# MAGIC aggregates into a monthly time series, and saves to Delta.
+# MAGIC Downloads all 9 Olist dataset files, joins them, and produces two Delta
+# MAGIC tables: an aggregate monthly time series and a per-seller monthly time
+# MAGIC series (for multi-series forecasting and fine-tuning).
 
 # COMMAND ----------
 
@@ -26,89 +27,175 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Download Olist dataset
+# MAGIC ## Download and load all Olist files
 
 # COMMAND ----------
 
 import kagglehub
+import pandas as pd
 
 path = kagglehub.dataset_download("olistbr/brazilian-ecommerce")
 print(f"Downloaded to: {path}")
 
-# COMMAND ----------
+files = {
+    "orders": "olist_orders_dataset.csv",
+    "items": "olist_order_items_dataset.csv",
+    "payments": "olist_order_payments_dataset.csv",
+    "products": "olist_products_dataset.csv",
+    "sellers": "olist_sellers_dataset.csv",
+    "customers": "olist_customers_dataset.csv",
+    "reviews": "olist_order_reviews_dataset.csv",
+    "categories": "product_category_name_translation.csv",
+    "geolocation": "olist_geolocation_dataset.csv",
+}
 
-# MAGIC %md
-# MAGIC ## Load and join orders with payments
-
-# COMMAND ----------
-
-import pandas as pd
-
-orders_pd = pd.read_csv(os.path.join(path, "olist_orders_dataset.csv"))
-payments_pd = pd.read_csv(os.path.join(path, "olist_order_payments_dataset.csv"))
-
-order_values = payments_pd.groupby("order_id")["payment_value"].sum().reset_index()
-order_values.columns = ["order_id", "order_value"]
-
-orders_pd = orders_pd.merge(order_values, on="order_id", how="inner")
-for col in ["order_purchase_timestamp", "order_delivered_customer_date"]:
-    orders_pd[col] = pd.to_datetime(orders_pd[col])
-
-orders = spark.createDataFrame(orders_pd)
-print(f"Orders: {orders.count()}")
+dfs = {}
+for name, fname in files.items():
+    fpath = os.path.join(path, fname)
+    dfs[name] = pd.read_csv(fpath)
+    print(f"{name}: {len(dfs[name]):,} rows, {list(dfs[name].columns)}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Aggregate into monthly time series
+# MAGIC ## Join into a single denormalized orders table
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
+orders = dfs["orders"].copy()
+for col in ["order_purchase_timestamp", "order_delivered_customer_date",
+            "order_approved_at", "order_estimated_delivery_date"]:
+    orders[col] = pd.to_datetime(orders[col], errors="coerce")
 
-monthly_delivered = (
-    orders
-    .filter(F.col("order_delivered_customer_date").isNotNull())
-    .withColumn("month", F.date_trunc("month", F.col("order_delivered_customer_date")))
-    .groupBy("month")
+items = dfs["items"].copy()
+items["item_total"] = items["price"] + items["freight_value"]
+
+payment_totals = dfs["payments"].groupby("order_id")["payment_value"].sum().reset_index()
+payment_totals.columns = ["order_id", "payment_value"]
+
+review_scores = dfs["reviews"].groupby("order_id")["review_score"].mean().reset_index()
+
+products = dfs["products"][["product_id", "product_category_name"]].copy()
+products = products.merge(
+    dfs["categories"], on="product_category_name", how="left"
+)
+
+enriched = (
+    items
+    .merge(orders[["order_id", "customer_id", "order_status",
+                    "order_purchase_timestamp", "order_delivered_customer_date",
+                    "order_estimated_delivery_date"]],
+           on="order_id", how="inner")
+    .merge(payment_totals, on="order_id", how="left")
+    .merge(review_scores, on="order_id", how="left")
+    .merge(products[["product_id", "product_category_name_english"]], on="product_id", how="left")
+    .merge(dfs["sellers"][["seller_id", "seller_state"]], on="seller_id", how="left")
+    .merge(dfs["customers"][["customer_id", "customer_state"]], on="customer_id", how="left")
+)
+
+enriched = enriched[enriched["order_status"] == "delivered"].copy()
+enriched["delivery_days"] = (
+    enriched["order_delivered_customer_date"] - enriched["order_purchase_timestamp"]
+).dt.total_seconds() / 86400
+
+print(f"Enriched delivered items: {len(enriched):,}")
+enriched.head()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Aggregate: monthly time series (single series)
+
+# COMMAND ----------
+
+enriched["month"] = enriched["order_purchase_timestamp"].dt.to_period("M").dt.to_timestamp()
+
+agg_monthly = (
+    enriched.groupby("month")
     .agg(
-        F.sum("order_value").alias("total_delivered_value"),
-        F.count("*").alias("delivered_count"),
-        F.avg(
-            F.datediff(
-                F.col("order_delivered_customer_date"),
-                F.col("order_purchase_timestamp"),
-            )
-        ).alias("avg_delivery_days"),
+        total_delivered_value=("item_total", "sum"),
+        new_orders_created=("order_id", "nunique"),
+        delivered_count=("order_id", "count"),
+        avg_delivery_days=("delivery_days", "mean"),
+        avg_review_score=("review_score", "mean"),
+        n_unique_sellers=("seller_id", "nunique"),
+        n_unique_products=("product_id", "nunique"),
+        avg_freight=("freight_value", "mean"),
     )
-    .orderBy("month")
+    .reset_index()
+    .sort_values("month")
 )
 
-monthly_created = (
-    orders
-    .withColumn("month", F.date_trunc("month", F.col("order_purchase_timestamp")))
-    .groupBy("month")
-    .agg(F.count("*").alias("new_orders_created"))
-    .orderBy("month")
-)
-
-monthly_ts = (
-    monthly_delivered
-    .join(monthly_created, on="month", how="outer")
-    .fillna(0)
-    .orderBy("month")
-)
-
-display(monthly_ts)
+print(f"Aggregate monthly: {len(agg_monthly)} months")
+display(spark.createDataFrame(agg_monthly))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Save to Delta
+# MAGIC ## Per-seller monthly time series
 
 # COMMAND ----------
 
-monthly_ts.createOrReplaceTempView("monthly_ts_temp")
-spark.sql(f"CREATE OR REPLACE TABLE {catalog}.{schema}.olist_monthly_ts AS SELECT * FROM monthly_ts_temp")
+seller_monthly_raw = (
+    enriched.groupby(["seller_id", "month"])
+    .agg(
+        revenue=("item_total", "sum"),
+        order_count=("order_id", "nunique"),
+        item_count=("order_id", "count"),
+        avg_price=("price", "mean"),
+        avg_freight=("freight_value", "mean"),
+        avg_delivery_days=("delivery_days", "mean"),
+        avg_review_score=("review_score", "mean"),
+        n_unique_products=("product_id", "nunique"),
+        n_unique_customers=("customer_id", "nunique"),
+    )
+    .reset_index()
+    .sort_values(["seller_id", "month"])
+)
 
-print(f"Saved to {catalog}.{schema}.olist_monthly_ts")
+all_months = pd.date_range(
+    enriched["month"].min(), enriched["month"].max(), freq="MS"
+)
+
+def fill_monthly_grid(grp):
+    grp = grp.set_index("month").reindex(all_months).rename_axis("month").reset_index()
+    grp["seller_id"] = grp["seller_id"].ffill().bfill()
+    fill_zero = ["revenue", "order_count", "item_count", "n_unique_products", "n_unique_customers"]
+    grp[fill_zero] = grp[fill_zero].fillna(0)
+    fill_cols = ["avg_price", "avg_freight", "avg_delivery_days", "avg_review_score"]
+    grp[fill_cols] = grp[fill_cols].ffill().bfill()
+    return grp
+
+seller_monthly = (
+    seller_monthly_raw
+    .groupby("seller_id", group_keys=False)
+    .apply(fill_monthly_grid)
+    .sort_values(["seller_id", "month"])
+    .reset_index(drop=True)
+)
+
+active_months = seller_monthly_raw.groupby("seller_id")["month"].count()
+min_active_months = 8
+active_sellers = active_months[active_months >= min_active_months].index
+seller_monthly_filtered = seller_monthly[seller_monthly["seller_id"].isin(active_sellers)].copy()
+
+print(f"Total sellers: {enriched['seller_id'].nunique()}")
+print(f"Sellers with >= {min_active_months} active months: {len(active_sellers)}")
+print(f"Per-seller monthly rows (with gap-fill): {len(seller_monthly_filtered):,}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Save both tables to Delta
+
+# COMMAND ----------
+
+agg_sdf = spark.createDataFrame(agg_monthly)
+agg_sdf.createOrReplaceTempView("agg_monthly_temp")
+spark.sql(f"CREATE OR REPLACE TABLE {catalog}.{schema}.olist_monthly_ts AS SELECT * FROM agg_monthly_temp")
+print(f"Saved {catalog}.{schema}.olist_monthly_ts ({len(agg_monthly)} rows)")
+
+seller_sdf = spark.createDataFrame(seller_monthly_filtered)
+seller_sdf.createOrReplaceTempView("seller_monthly_temp")
+spark.sql(f"CREATE OR REPLACE TABLE {catalog}.{schema}.olist_seller_monthly_ts AS SELECT * FROM seller_monthly_temp")
+print(f"Saved {catalog}.{schema}.olist_seller_monthly_ts ({len(seller_monthly_filtered):,} rows)")

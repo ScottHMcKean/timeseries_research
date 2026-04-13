@@ -26,6 +26,4 @@ resources:
             base_parameters:
               catalog: "shm"
               schema: "ts"
-          environment_key: default
-          compute:
-            hardware_accelerator: GPU_1xA10
+          existing_cluster_id: "0413-033721-y3w2m2kb"
